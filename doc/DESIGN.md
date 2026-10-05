@@ -158,8 +158,9 @@ need to renumber columns.
 | `Filter(in, pred)` | same as in | |
 | `Project(in, []NamedExpr)` | same as in | |
 | `Lookup(in, rel, path, key []Expr, many, optional, reverse, limit, cols)` | Stream | correlated traversal with flat output (SQL joins). `key` is evaluated against the input row. `optional` = left join |
-| `Map(in, []Field{name, subplan})` | Stream | nested records (GraphQL-style) |
+| `Map(in, []Field{name, subplan, one, batched})` | Stream | nested records (GraphQL-style). `Outer` refs in a subplan bind to the input row |
 | `Limit(in, n)` | Stream | |
+| `Sort(in, keys)` | same as in | logical only; the optimizer must remove it (§7) |
 | `Return(in)` | — | plan root |
 
 ### 6.2 Mutation ops
@@ -207,39 +208,64 @@ added.
 
 ## 7. Optimizer (`opt`)
 
-The optimizer applies rules until the plan stops changing. Frontends may emit
-either a naive `Filter(Scan full)` or an already-specific plan.
+`opt.Optimize(plan, Options{AllowFullScan})` makes a single top-down rewrite,
+followed by a few bottom-up passes. It never modifies its input.
 
-1. **PK equality:** `Filter(Scan primary, pk == e)` → `Get`.
-2. **Access-path selection:** `Filter(Scan)` whose conjuncts bind a path's
-   partition by equality and a prefix of its sort key by equality or range →
-   bounded `Scan` on that path. Any conjuncts that remain stay in a `Filter`.
-3. **Limit pushdown:** into `Scan` and `Lookup`, but only when no `Filter` remains
-   between them.
-4. **Projection pushdown:** required columns are passed down to the store through
-   `cols`.
-5. **Lookup batching (N+1 elimination):** the executor already batches every
+Frontends may emit naive plans, such as `Filter(Scan full)` with an optional
+`Sort` and `Limit`, or plans that are already specific. ORDER BY is expressed as
+a logical **`Sort`** node. `Sort` has no runtime implementation: the optimizer
+must remove it by choosing a path and direction that provide the order, and the
+executor rejects any `Sort` that is left.
+
+1. **Predicate pushdown:** conjuncts of a `Filter` move below `Lookup` when they
+   reference no target columns, and below `Map` when they reference no field.
+   Stacked filters are merged.
+2. **Access-path selection:** for `Filter(Scan full)`, the conjuncts of the form
+   `col op bindable` (where bindable means a literal, parameter, outer ref, or
+   arithmetic over these) are matched against every path:
+   - The equality prefix must cover the partition. A range on the next key
+     column becomes `lo`/`hi`.
+   - A full unique key becomes `Get`, and `pk IN (...)` on a single-column
+     unique path becomes `GetMany`.
+   - Literals that cannot be coerced to the key column type are not used as
+     keys, because the filter and key semantics would differ.
+   - Conjuncts that are not consumed stay in a `Filter`.
+3. **Order satisfaction:** `Sort` keys must follow the path's key columns that
+   come after the equality prefix, all in one direction. Equality-bound columns
+   are skipped, and keys after a full unique key do not matter. A descending
+   order sets `reverse`. `Lookup` preserves input order. Ordering by `Lookup`
+   target columns is satisfied by the lookup path when the input is a single
+   row (`Get`). Anything else fails with `ErrOrder`.
+4. **Limit pushdown:** into `Scan.limit`, through `Project`, `Map`, and 1:1
+   optional `Lookup`, and into `Lookup.limit` when its input is a single row. A
+   `Limit` stays in place above a residual `Filter`.
+5. **Projection pushdown:** each `Get`/`GetMany`/`Scan`/`Lookup` gets the columns
+   that its consumers reference. Mutations always need full rows.
+6. **Map batching (N+1 elimination):** the executor already batches every
    `Lookup`. A N:1 lookup issues one `GetMany` per input batch, and a 1:N lookup
-   runs bounded scans in parallel. The rule rewrites the N+1 pattern
-   `Map(field: Get/Scan keyed on Outer(...))` into a `Lookup` so that it gets
-   batched as well.
-6. **Order satisfaction:** ORDER BY must match the path's sort order or its
-   reverse. Otherwise the result is a plan error. No sort operator exists.
+   runs bounded scans in parallel. This rule marks a `Map` field as `batched`
+   when its plan is a chain of row-wise operators over one `Get`/`Scan` leaf. The
+   executor then fetches the leaf for the whole input batch (one `GetMany`, or
+   parallel scans) and runs the rest of the chain per row.
+7. **Final check:** a `Scan` with no bounds and no limit fails with `ErrFullScan`
+   unless `AllowFullScan` is set.
 
 The same rules plan the read side of `Update` and `Delete`.
 
-**Ranking** (rule-based, with no statistics yet):
+**Ranking** (rule-based, with no statistics yet). Ties go to the candidate that
+consumes more conjuncts, then to the earlier path (primary first).
 
 | Access | Cost |
 |---|---|
-| exact unique key | 1 |
-| unique-path eq on secondary | 2 |
-| prefix scan | 10 |
-| bounded range | 50 |
-| full scan | 10000 (refused unless `AllowFullScan` is set) |
+| exact primary key (`Get`) | 1 |
+| exact key on unique secondary path (`Get`) | 2 |
+| `IN` list on single-column unique path (`GetMany`) | 3 |
+| equality prefix (with optional range) | 10 |
+| range only | 50 |
+| full scan | 10000 (refused unless `AllowFullScan` is set, or bounded by a limit) |
 
-A plan is also refused when the chosen path needs a capability the store lacks,
-for example a range on a path that is not ordered.
+Planned: refusing paths that need a capability the store lacks, for example a
+range on a path that is not ordered.
 
 ## 8. Executor (`exec`)
 
@@ -410,7 +436,7 @@ orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
 |---|---|---|
 | 0 ✅ | `go.mod`, `value` + key encoding, `schema` catalog (Go API + JSON/YAML) | encoding property tests pass |
 | 1 ✅ | `ir` (read + mutation ops), builder, EXPLAIN; `kvstore` + `memory` with `Apply` and index maintenance; `exec` | hand-built read/mutation plans run; conformance suite (incl. randomized index consistency) passes on memory |
-| 2 | `opt` rules 1–6, also applied to the mutation read side | golden plan tests |
+| 2 ✅ | `opt` rules 1–7, also applied to the mutation read side | golden plan tests; optimized vs. original result equivalence |
 | 3 | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
 | 4 | `pebble` backend; full conformance suite incl. randomized index-consistency test | **MVP:** memory and pebble pass identical suites |
 | 5 | GraphQL frontend; N+1 batching verified | thesis test passes |

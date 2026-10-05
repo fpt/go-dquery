@@ -70,6 +70,13 @@ func validateNode(n Node) error {
 				return fmt.Errorf("ir: Map: invalid or duplicate field %q", f.Name)
 			}
 			seen[f.Name] = true
+			if f.Batched && BatchLeaf(f.Plan) == nil {
+				return fmt.Errorf("ir: Map: field %q is batched but its plan has no single Get/Scan leaf", f.Name)
+			}
+		}
+	case *Sort:
+		if len(n.Keys) == 0 {
+			return errors.New("ir: Sort: no keys")
 		}
 	case *Limit:
 		if n.N < 0 {
