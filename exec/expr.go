@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"time"
 
 	"github.com/fpt/go-dquery/ir"
 	"github.com/fpt/go-dquery/value"
@@ -264,11 +263,7 @@ func asTimestamp(s, other value.Value) (value.Value, bool) {
 	if s.Kind() != value.KindString || other.Kind() != value.KindTimestamp {
 		return value.Null, false
 	}
-	t, err := time.Parse(time.RFC3339Nano, s.Str())
-	if err != nil {
-		return value.Null, false
-	}
-	return value.Timestamp(t), true
+	return value.ParseTimestamp(s.Str())
 }
 
 var errDivZero = errors.New("exec: division by zero")
