@@ -31,8 +31,9 @@ gofmt -l .                  # must print nothing
 - `exec/` — Batched pull executor; mutations run the read side, then one atomic `Store.Apply`.
 - `storage/` — `Store` interface and capabilities. `storage/kvstore` implements relations on an ordered KV (row/index encoding, index maintenance). `storage/memory` (in-memory) and `storage/pebble` (persistent; `BindCatalog` guards the on-disk layout) are KV engines. `storage/storagetest` is the conformance suite.
 - `frontend/sql/` — SQL subset: lexer, recursive-descent parser (produces `ir.Expr` directly), binder (name resolution; JOIN ... ON → `Lookup` on an access path). `sql.Compile` = parse + bind + `opt.Optimize`.
+- `frontend/graphql/` — GraphQL: SDL generated from the catalog (Hasura-style `rel`, `rel_by_pk`, `rel_by_<path>`, `insert_/update_/delete_rel`), validated by gqlparser, lowered to IR (relationships → batched `Map` fields). `Schema.Execute`, `Schema.Handler`. Tests assert that equivalent SQL and GraphQL produce the same plan; keep that true.
 - `dquery.go` (root package `dquery`) — `DB`: SQL in, results out (`Exec`, `ExecScript`, EXPLAIN as rows).
-- `cmd/dq/` — REPL over an in-memory store (`go run ./cmd/dq -schema examples/shop.yaml examples/shop.sql`).
+- `cmd/dq/` — REPL (or GraphQL server with `-http`) over an in-memory or Pebble store (`go run ./cmd/dq -schema examples/shop.yaml examples/shop.sql`).
 - `examples/` — Example schema and seed data. `examples/shop.yaml` must stay identical to `internal/fixture` (a test enforces this).
 - `internal/fixture/` — Shared `users → orders → items` test schema and row helpers.
 

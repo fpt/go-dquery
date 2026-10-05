@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/cockroachdb/pebble/v2 v2.1.7
 	github.com/tidwall/btree v1.8.2
+	github.com/vektah/gqlparser/v2 v2.5.60
 	golang.org/x/sync v0.23.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -13,6 +14,7 @@ require (
 	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/RaduBerinde/axisds v0.1.0 // indirect
 	github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 // indirect
+	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/cockroachdb/crlib v0.0.0-20241112164430-1264a2edc35b // indirect
