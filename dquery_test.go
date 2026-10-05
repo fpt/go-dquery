@@ -11,6 +11,7 @@ import (
 	"github.com/fpt/go-dquery/internal/fixture"
 	"github.com/fpt/go-dquery/storage"
 	"github.com/fpt/go-dquery/storage/memory"
+	"github.com/fpt/go-dquery/storage/pebble"
 	"github.com/fpt/go-dquery/value"
 )
 
@@ -26,9 +27,30 @@ INSERT INTO orders VALUES
 INSERT INTO items VALUES (10, 1, 'pen', 2), (10, 2, 'ink', 1), (12, 1, 'pad', 3);
 `
 
-func open(t *testing.T) *dquery.DB {
+// backends lists the stores every SQL test runs against; results must be
+// identical.
+var backends = map[string]func(t *testing.T) storage.Store{
+	"memory": func(*testing.T) storage.Store { return memory.NewStore() },
+	"pebble": func(t *testing.T) storage.Store {
+		s, err := pebble.Open(t.TempDir(), pebble.Options{NoSync: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return s
+	},
+}
+
+// forEachBackend runs fn as a subtest per backend with a seeded DB.
+func forEachBackend(t *testing.T, fn func(t *testing.T, db *dquery.DB)) {
+	for name, newStore := range backends {
+		t.Run(name, func(t *testing.T) { fn(t, open(t, newStore(t))) })
+	}
+}
+
+func open(t *testing.T, store storage.Store) *dquery.DB {
 	t.Helper()
-	db := dquery.Open(fixture.Shop(), memory.NewStore())
+	db := dquery.Open(fixture.Shop(), store)
 	if _, err := db.ExecScript(ctx, seedSQL); err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +72,9 @@ func render(r *exec.Result) string {
 	return b.String()
 }
 
-func TestSQLEndToEnd(t *testing.T) {
-	db := open(t)
+func TestSQLEndToEnd(t *testing.T) { forEachBackend(t, testSQLEndToEnd) }
+
+func testSQLEndToEnd(t *testing.T, db *dquery.DB) {
 	steps := []struct {
 		sql      string
 		params   []value.Value
@@ -125,8 +148,9 @@ name | email
 	}
 }
 
-func TestSQLConstraintErrors(t *testing.T) {
-	db := open(t)
+func TestSQLConstraintErrors(t *testing.T) { forEachBackend(t, testSQLConstraintErrors) }
+
+func testSQLConstraintErrors(t *testing.T, db *dquery.DB) {
 	if _, err := db.Exec(ctx, `INSERT INTO users VALUES (5, 'eve', 'ann@x')`); !errors.Is(err, storage.ErrDuplicateKey) {
 		t.Fatalf("unique email: %v", err)
 	}
@@ -144,7 +168,7 @@ func TestSQLConstraintErrors(t *testing.T) {
 }
 
 func TestSQLExplain(t *testing.T) {
-	db := open(t)
+	db := open(t, memory.NewStore())
 	res, err := db.Exec(ctx, `EXPLAIN SELECT name FROM users WHERE id = 1`)
 	if err != nil {
 		t.Fatal(err)

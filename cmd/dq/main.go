@@ -1,6 +1,9 @@
-// Command dq is an interactive SQL shell over an in-memory go-dquery store.
+// Command dq is an interactive SQL shell over a go-dquery store.
 //
-//	dq -schema shop.yaml [-allow-full-scan] [-c "SQL"] [script.sql ...]
+//	dq -schema shop.yaml [-data DIR] [-allow-full-scan] [-c "SQL"] [script.sql ...]
+//
+// Without -data the store is in memory and discarded on exit; with -data it
+// is a Pebble database in DIR.
 //
 // Scripts are executed first; then statements are read from stdin until EOF
 // or \q, unless -c is given.
@@ -21,7 +24,9 @@ import (
 	"github.com/fpt/go-dquery/exec"
 	"github.com/fpt/go-dquery/frontend/sql"
 	"github.com/fpt/go-dquery/schema"
+	"github.com/fpt/go-dquery/storage/kvstore"
 	"github.com/fpt/go-dquery/storage/memory"
+	"github.com/fpt/go-dquery/storage/pebble"
 	"github.com/fpt/go-dquery/value"
 )
 
@@ -34,6 +39,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	schemaPath := fs.String("schema", "", "schema file (YAML or JSON); required")
 	allowFull := fs.Bool("allow-full-scan", false, "allow unbounded full scans")
+	dataDir := fs.String("data", "", "persist data in a Pebble database in this directory (default: in memory)")
 	command := fs.String("c", "", "execute this SQL and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -48,7 +54,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "dq:", err)
 		return 1
 	}
-	sh := &shell{db: dquery.Open(cat, memory.NewStore()), out: stdout, errOut: stderr}
+	var store *kvstore.Store
+	if *dataDir == "" {
+		store = memory.NewStore()
+	} else if store, err = pebble.Open(*dataDir, pebble.Options{}); err != nil {
+		fmt.Fprintln(stderr, "dq:", err)
+		return 1
+	}
+	defer store.Close()
+	if err := store.BindCatalog(cat); err != nil {
+		fmt.Fprintln(stderr, "dq:", err)
+		return 1
+	}
+	sh := &shell{db: dquery.Open(cat, store), out: stdout, errOut: stderr}
 	sh.db.Options.AllowFullScan = *allowFull
 
 	for _, path := range fs.Args() {
