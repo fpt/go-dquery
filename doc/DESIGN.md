@@ -373,7 +373,27 @@ makes check-then-write correct within one process. If the stored row differs
 from `Old` (a lost update between the read side and `Apply`), the result is
 `ErrConflict`, and the executor retries the statement.
 
-### 9.2 Remote backends (later)
+### 9.2 Pebble and catalog binding
+
+`storage/pebble` adapts Pebble v2 to `kvstore.KV`:
+- An iterator uses Pebble's point-in-time view, with bounds set as
+  `LowerBound`/`UpperBound`.
+- A batch is a Pebble batch, synced by default. `NoSync` skips the fsync.
+- `OpenInMemory` uses Pebble's in-memory filesystem, for tests.
+
+Relation and path IDs are part of every key and are assigned by position in the
+schema. A persistent store must not be reopened with a schema that changes
+them. `kvstore.Store.BindCatalog(cat)` records each relation's layout (ID, name,
+columns with type and nullability, and access paths) under a metadata key,
+using relation ID 0, which is never assigned to a table. On the next open it
+verifies the layout:
+- New relations are allowed.
+- A changed, reordered, or removed relation is an error.
+
+`dq -data DIR` and every persistent embedding should call `BindCatalog` right
+after opening the store.
+
+### 9.3 Remote backends (later)
 
 - **Bigtable:** uses the same key layout as `kvstore`, with one table per database
   and one row per KV entry. Writes are atomic only within a single row, so
@@ -454,8 +474,8 @@ optimized plan. `dquery.DB` wraps a catalog, an executor, and options:
 - `ExecScript` runs a script.
 - `EXPLAIN` returns the optimized plan as rows.
 
-**REPL.** `dq -schema s.yaml [-allow-full-scan] [-c SQL] [script.sql ...]`
-uses an in-memory store. Statements end with `;`. The meta-commands are `\d`
+**REPL.** `dq -schema s.yaml [-data DIR] [-allow-full-scan] [-c SQL] [script.sql ...]`
+uses an in-memory store by default, or a Pebble database in `DIR`. Statements end with `;`. The meta-commands are `\d`
 (list tables), `\d table` (columns, access paths, and relationships), and `\q`.
 
 ### 10.2 GraphQL (`frontend/graphql`, after the MVP core)
@@ -487,7 +507,7 @@ orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
 | 1 ✅ | `ir` (read + mutation ops), builder, EXPLAIN; `kvstore` + `memory` with `Apply` and index maintenance; `exec` | hand-built read/mutation plans run; conformance suite (incl. randomized index consistency) passes on memory |
 | 2 ✅ | `opt` rules 1–7, also applied to the mutation read side | golden plan tests; optimized vs. original result equivalence |
 | 3 ✅ | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
-| 4 | `pebble` backend; full conformance suite incl. randomized index-consistency test | **MVP:** memory and pebble pass identical suites |
+| 4 ✅ | `pebble` backend; full conformance suite incl. randomized index-consistency test; catalog binding; `dq -data` | **MVP:** memory and pebble pass identical suites, and the end-to-end SQL tests run on both |
 | 5 | GraphQL frontend; N+1 batching verified | thesis test passes |
 | 6 | Bigtable (`cbtemulator`) and DynamoDB (DynamoDB Local) adapters | conformance suite passes, with capability-based skips |
 | later | protobuf IR serialization, RocksDB cgo adapter, multi-statement transactions, LINQ-like Go API, descending-column encoding | |
@@ -502,4 +522,5 @@ orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
 - **Index entries that cover extra columns:** this would avoid the fetch after an
   index scan, at the cost of write amplification.
 - **Schema evolution** (adding columns or paths, backfilling indexes): out of scope
-  for the MVP.
+  for the MVP. `BindCatalog` refuses incompatible changes instead of misreading
+  data. Only adding a relation is allowed.

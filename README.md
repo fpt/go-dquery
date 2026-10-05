@@ -24,7 +24,7 @@ See [doc/DESIGN.md](doc/DESIGN.md) for the full design and roadmap.
 
 ## Status
 
-Early development.
+Early development. The MVP (phases 0–4) is complete: SQL over in-memory or Pebble storage.
 
 | Phase | Scope | Status |
 |---|---|---|
@@ -32,7 +32,7 @@ Early development.
 | 1 | IR, executor, memory backend, mutations with index maintenance | done |
 | 2 | Optimizer | done |
 | 3 | SQL subset frontend, REPL | done |
-| 4 | Pebble backend (MVP) | planned |
+| 4 | Pebble backend (MVP) | done |
 | 5 | GraphQL frontend | planned |
 | 6 | Bigtable, DynamoDB | planned |
 
@@ -113,7 +113,8 @@ ERROR: opt: query requires an unbounded full scan: orders
 The shell supports `SELECT` with joins, `ORDER BY`, and `LIMIT`, as well as
 `INSERT` (including `ON CONFLICT`), `UPDATE`, `DELETE`, `RETURNING`, and
 `EXPLAIN`. Queries that would need a full scan or a sort that no index provides
-are rejected. Pass `-allow-full-scan` to allow full scans. From Go, use
+are rejected. Pass `-allow-full-scan` to allow full scans, and pass
+`-data ./db` to persist the data in a Pebble database. From Go, use
 `dquery.Open(catalog, store).Exec(ctx, sql, params...)`.
 
 ## Development

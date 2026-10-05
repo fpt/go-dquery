@@ -68,3 +68,21 @@ func TestCommandFlag(t *testing.T) {
 		t.Fatalf("missing -schema: expected exit 2, got %d", code)
 	}
 }
+
+func TestPersistentData(t *testing.T) {
+	dir := t.TempDir()
+	args := func(extra ...string) []string {
+		return append([]string{"-schema", "../../examples/shop.yaml", "-data", dir}, extra...)
+	}
+	var out, errOut bytes.Buffer
+	if code := run(args("-c", "INSERT INTO users VALUES (7, 'gus', 'gus@x')"), nil, &out, &errOut); code != 0 {
+		t.Fatalf("insert: exit %d: %s", code, errOut.String())
+	}
+	out.Reset()
+	if code := run(args("-c", "SELECT name FROM users WHERE email = 'gus@x'"), nil, &out, &errOut); code != 0 {
+		t.Fatalf("select: exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "gus") {
+		t.Fatalf("data not persisted:\n%s", out.String())
+	}
+}

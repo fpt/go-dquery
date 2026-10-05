@@ -18,7 +18,7 @@ go build ./...
 go vet ./...
 go test ./...               # all tests
 go test -race ./...         # run before finishing any change touching exec/ or storage/
-go test ./storage/memory -run TestConformance/RandomizedIndexConsistency -v
+go test ./storage/... -run TestConformance/RandomizedIndexConsistency -v
 gofmt -l .                  # must print nothing
 ```
 
@@ -29,7 +29,7 @@ gofmt -l .                  # must print nothing
 - `ir/` — IR nodes and expressions, `Validate`, `Explain` (deterministic; used by golden tests).
 - `opt/` — Rule-based optimizer (access-path selection, predicate/limit/projection pushdown, order satisfaction, Map batching).
 - `exec/` — Batched pull executor; mutations run the read side, then one atomic `Store.Apply`.
-- `storage/` — `Store` interface and capabilities. `storage/kvstore` implements relations on an ordered KV (row/index encoding, index maintenance). `storage/memory` is a KV engine. `storage/storagetest` is the conformance suite.
+- `storage/` — `Store` interface and capabilities. `storage/kvstore` implements relations on an ordered KV (row/index encoding, index maintenance). `storage/memory` (in-memory) and `storage/pebble` (persistent; `BindCatalog` guards the on-disk layout) are KV engines. `storage/storagetest` is the conformance suite.
 - `frontend/sql/` — SQL subset: lexer, recursive-descent parser (produces `ir.Expr` directly), binder (name resolution; JOIN ... ON → `Lookup` on an access path). `sql.Compile` = parse + bind + `opt.Optimize`.
 - `dquery.go` (root package `dquery`) — `DB`: SQL in, results out (`Exec`, `ExecScript`, EXPLAIN as rows).
 - `cmd/dq/` — REPL over an in-memory store (`go run ./cmd/dq -schema examples/shop.yaml examples/shop.sql`).
