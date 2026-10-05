@@ -5,7 +5,7 @@ Module: `github.com/fpt/go-dquery`
 ## 1. Goal
 
 go-dquery is a pure-Go **OLTP query runtime** that sits between query frontends
-(SQL, later GraphQL and a LINQ-like Go API) and key-value storage engines
+(SQL and GraphQL, and later a typed Go API) and key-value storage engines
 (Pebble/RocksDB, Bigtable, DynamoDB).
 
 Frontends compile **directly** into a single DAG IR. The IR is not translated
@@ -20,6 +20,39 @@ The target workload is *key/index traversal that fetches a small working set*:
 - predicates, projection, limit
 - ordering only when an access path provides it
 - transactional mutations (insert / update / delete) with index maintenance
+
+### Core principle
+
+**What the IR can express is what a KV store can execute cheaply.** The value
+of the project is not that it skips SQL. OLTP plan spaces are small, so going
+through SQL costs little optimizer time. The value is that the IR refuses work
+that a key-value store cannot do efficiently, independent of the frontend:
+
+- `Sort` is only a logical node. It must be satisfied by an access path's
+  order, or planning fails with `ErrOrder`. There is no runtime sort.
+- A scan with no bounds and no limit fails with `ErrFullScan` unless the caller
+  opts in.
+- Access paths are modeled as partition and sort keys, so one model covers
+  DynamoDB (partition key equality, then a sort-key range) and ordered KV
+  engines (key prefix, then a range).
+- Nested results keep their shape (`Map` with batched lookups). Joins are not
+  flattened and then re-aggregated into JSON.
+
+SQL-backed API layers (Hasura, Prisma) struggle because SQL can express far
+more than the store underneath can execute well, and it accepts all of it. New
+features must keep this property. Rules for extending expressions are in §6.3,
+and an operator that needs a whole result set must not be added as a runtime
+fallback.
+
+### Related work
+
+- **Apache Calcite:** relational-algebra IR, multiple frontends, and adapters.
+  go-dquery is "Calcite narrowed to access paths for OLTP/KV".
+- **Substrait:** a serializable relational IR. go-dquery's IR sits lower, and
+  IR serialization is on the roadmap.
+- **FoundationDB Record Layer:** the closest relative. It provides records,
+  indexes, and query planning on an ordered KV store. It differs in having a
+  single storage engine and its own query API.
 
 ### Non-goals (for now)
 
@@ -194,6 +227,29 @@ times (default 3).
 Expressions are literal, parameter (`$1`), column ref, outer ref (`$.col`, inside
 `Lookup`/`Map` subplans), comparison, `AND/OR/NOT`, `IN (list)`, `IS NULL`, and
 simple arithmetic for `UPDATE ... SET x = x + 1`.
+
+**Extension rule.** Requests for more SQL usually arrive here first. Decide
+them with one rule:
+
+- **Row-local computation may be added freely.** These are expressions that
+  look at one row (and its outer row): `CASE`, `COALESCE`, string, math, and
+  date functions, casts, and `LIKE` with a literal prefix. They only extend
+  `Filter`/`Project` and never change what is read. A `LIKE 'abc%'` can also
+  become a prefix bound on an access path.
+- **Anything that needs the whole stream is not added.** This covers
+  aggregates, `GROUP BY`, `DISTINCT`, sorts that no path provides, and
+  set operations. A frontend that needs these is outside the OLTP scope, or
+  needs a separately designed precomputed structure, such as a maintained
+  aggregate.
+- **Possible exception: bounded top-N.** `ORDER BY x LIMIT n` with a small
+  constant `n` over a stream that is itself bounded (for example the items of
+  one order) could use an in-memory heap capped at a configured size. Planning
+  must still fail when the input is not bounded.
+- **Pagination uses key cursors, not `OFFSET`.** `OFFSET k` reads and discards
+  `k` rows. A cursor (`WHERE (sort cols) > (last seen)` on the same path) is a
+  bounded scan and fits access paths directly.
+- `DISTINCT` on a set of columns that includes a unique key is a no-op, and may
+  be accepted as such.
 
 ### 6.4 EXPLAIN
 
@@ -400,6 +456,23 @@ after opening the store.
   `AtomicMultiRow=false`. Index maintenance is best-effort, with a read-side check
   that drops index hits whose row no longer matches. The check uses
   `CheckAndMutateRow` on the base row.
+
+  **Write-order invariant.** Without multi-row atomicity, a crash can leave a
+  partial write. The read-side check only repairs *dangling* index entries,
+  where the entry exists but the row does not match. It cannot repair a
+  *missing* entry: a row written without its index entry is permanently
+  invisible through that path. So writes are ordered so that a crash can only
+  ever leave dangling entries:
+  1. Insert or update: write the new index entries, then the row (conditional
+     on the `Old` image), then delete the stale index entries.
+  2. Delete: delete the row (conditional), then delete its index entries.
+
+  Two consequences follow:
+  - A uniqueness check that finds a conflicting index entry must confirm that
+    the base row still holds that key before failing. Otherwise a dangling
+    entry would block valid inserts.
+  - A background cleanup job (scan the paths, drop entries whose row does not
+    match) is needed to keep dangling entries from piling up.
 - **DynamoDB:** each relation maps to a table. Primary access path = (partition
   key, sort key). Secondary paths = GSIs, with `Eventual` consistency. `Apply` maps
   to `TransactWriteItems` with condition expressions, and `GetMany` maps to
@@ -572,18 +645,28 @@ across relationships.
 | 3 ✅ | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
 | 4 ✅ | `pebble` backend; full conformance suite incl. randomized index-consistency test; catalog binding; `dq -data` | **MVP:** memory and pebble pass identical suites, and the end-to-end SQL tests run on both |
 | 5 ✅ | GraphQL frontend (queries, mutations, HTTP); N+1 batching verified | thesis test passes: identical plans for flat queries, identical access for nested ones |
-| 6 | Bigtable (`cbtemulator`) and DynamoDB (DynamoDB Local) adapters | conformance suite passes, with capability-based skips |
-| later | protobuf IR serialization, RocksDB cgo adapter, multi-statement transactions, LINQ-like Go API, descending-column encoding | |
+| 6 | Bigtable (`cbtemulator`) and DynamoDB (DynamoDB Local) adapters ([#5](https://github.com/fpt/go-dquery/issues/5)); preceded by the transaction design ([#6](https://github.com/fpt/go-dquery/issues/6)) | conformance suite passes, with capability-based skips |
+| next | covering indexes ([#7](https://github.com/fpt/go-dquery/issues/7)), appending nullable columns ([#8](https://github.com/fpt/go-dquery/issues/8)), typed Go query API ([#9](https://github.com/fpt/go-dquery/issues/9)) | |
+| later | protobuf IR serialization, RocksDB cgo adapter, row-local expression functions and key-cursor pagination (§6.3), descending-column encoding | |
 
 ## 13. Open questions
 
-- **Multi-statement transactions:** a `Txn` interface with read-your-writes over
-  Pebble indexed batches, versus single-statement atomicity only. The MVP does
-  single-statement only.
+- **Multi-statement transactions** ([#6](https://github.com/fpt/go-dquery/issues/6)):
+  the biggest open item for an OLTP runtime. Applications do read-modify-write
+  across statements. The likely design is optimistic transactions:
+  read-your-writes through a transaction overlay, plus validation of the read set
+  at commit. That maps onto memory and Pebble directly, and onto DynamoDB
+  `TransactWriteItems` with `ConditionCheck` items (100-item limit). Bigtable can
+  only declare no transactions. The design must be settled before phase 6,
+  because it decides the Bigtable adapter's shape and the capability flags.
 - **Nested result representation:** nested results are `Record`/`List` values
   inside `Row`. Is a separate result tree needed for GraphQL errors and nullability?
-- **Index entries that cover extra columns:** this would avoid the fetch after an
-  index scan, at the cost of write amplification.
-- **Schema evolution** (adding columns or paths, backfilling indexes): out of scope
-  for the MVP. `BindCatalog` refuses incompatible changes instead of misreading
-  data. Only adding a relation is allowed.
+- **Covering indexes** ([#7](https://github.com/fpt/go-dquery/issues/7)):
+  `AccessPath.Include []ColID` stores extra columns in index entries, so a scan
+  can skip fetching the row. The IR is unchanged. DynamoDB GSI projections need
+  this.
+- **Schema evolution**: `BindCatalog` refuses incompatible changes instead of
+  misreading data. Today only adding a relation is allowed. Appending *nullable*
+  columns needs no backfill (old rows decode with NULL padding), and is planned
+  in [#8](https://github.com/fpt/go-dquery/issues/8). Adding paths needs a
+  backfill and is a separate problem.

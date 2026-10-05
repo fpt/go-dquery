@@ -47,5 +47,6 @@ gofmt -l .                  # must print nothing
 - Mutations: inserts must not exist yet, and updates/deletes carry the full `Old` image (optimistic check → `ErrConflict`, retried by the executor). Primary key columns cannot be updated.
 - Every new storage backend must pass `storagetest.Run`.
 - SQL outside the OLTP subset must fail with `sql.ErrNotSupported` naming the construct. Do not silently fall back to full scans or runtime sorts.
+- Core principle (DESIGN §1): the IR can only express what a KV store executes cheaply. When extending expressions, follow DESIGN §6.3: row-local computation may be added; anything that needs the whole stream (aggregates, DISTINCT, unsatisfied sorts, OFFSET) may not.
 - Tests: prefer table-driven tests with golden EXPLAIN strings for plans and rendered result tables for execution. Use `internal/fixture` instead of ad-hoc schemas.
 - Match existing style: short doc comments on exported identifiers, errors prefixed with the package name (`exec: ...`, `kvstore: ...`), and sentinel errors wrapped with `%w`.

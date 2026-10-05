@@ -2,11 +2,26 @@
 
 An OLTP query runtime for key-value stores, written in Go.
 
-go-dquery compiles queries straight into a small DAG IR built around **access
-paths** and **key traversal**: `Get`, `Scan`, `Lookup`, `Map`. The queries are
-not routed through SQL as an intermediate language. The IR is optimized with a
-few targeted rules and executed against ordered KV engines such as Pebble and
-RocksDB, or remote stores such as Bigtable and DynamoDB.
+go-dquery compiles SQL and GraphQL into a small DAG IR whose vocabulary is
+**access paths** and **key traversal**: `Get`, `Scan`, `Lookup`, `Map`. The IR
+is designed so that **what it can express is exactly what a key-value store can
+execute cheaply**:
+
+- An `ORDER BY` must be served by an index order. Otherwise the query fails at
+  plan time (`ErrOrder`); nothing sorts at run time.
+- A query that would read a whole table fails at plan time (`ErrFullScan`)
+  unless you opt in.
+- Indexes are modeled as partition and sort keys, so the same model covers
+  DynamoDB and ordered KV engines such as Pebble, RocksDB, and Bigtable.
+
+These are DynamoDB-style constraints, lifted out of any one storage engine or
+query language. A frontend cannot accidentally produce a query that is
+expensive on a KV store, because the IR has no way to say it.
+
+The IR also keeps the **shape** of nested queries. A GraphQL selection stays
+nested (`Map`) and is fetched with batched lookups. It is not flattened into
+joins and then re-aggregated into JSON, which is where SQL-backed GraphQL
+servers spend most of their effort.
 
 ```
  SQL ─────┐
@@ -137,6 +152,23 @@ SELECT id, amount FROM orders WHERE user_id = 1 ORDER BY created_at DESC LIMIT 1
 ```graphql
 { orders(where: {user_id: {_eq: 1}}, order_by: {created_at: desc}, limit: 10) { id amount } }
 ```
+
+## Related work
+
+- **Apache Calcite:** relational-algebra IR, multiple frontends, pluggable
+  adapters. go-dquery is similar in structure, but its vocabulary is narrowed
+  to access paths for OLTP on KV stores, instead of general relational algebra
+  aimed at analytics.
+- **Substrait:** a serializable cross-engine relational IR. go-dquery's IR sits
+  lower (access paths, not relations), and serializing it is on the roadmap.
+- **FoundationDB Record Layer:** the closest relative. It provides records,
+  indexes, and planned queries on an ordered KV store. go-dquery differs in
+  targeting several storage engines through capabilities, and in compiling
+  existing query languages (SQL, GraphQL) instead of providing its own API.
+- **Hasura and PostGraphile:** GraphQL over SQL databases. go-dquery borrows
+  Hasura's GraphQL conventions but compiles to access paths, and rejects
+  queries that the store cannot serve efficiently instead of letting SQL accept
+  everything.
 
 ## Development
 
