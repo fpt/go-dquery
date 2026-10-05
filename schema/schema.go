@@ -5,7 +5,6 @@ package schema
 import (
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/fpt/go-dquery/value"
 )
@@ -75,9 +74,8 @@ func (c *Column) Coerce(v value.Value) (value.Value, error) {
 		return value.Float(float64(v.Int())), nil
 	}
 	if want == value.KindTimestamp && v.Kind() == value.KindString {
-		t, err := time.Parse(time.RFC3339Nano, v.Str())
-		if err == nil {
-			return value.Timestamp(t), nil
+		if t, ok := value.ParseTimestamp(v.Str()); ok {
+			return t, nil
 		}
 	}
 	return v, fmt.Errorf("schema: column %q: cannot use %s as %s", c.Name, v.Kind(), c.Type)

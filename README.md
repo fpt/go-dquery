@@ -31,7 +31,7 @@ Early development.
 | 0 | Values, key encoding, schema catalog | done |
 | 1 | IR, executor, memory backend, mutations with index maintenance | done |
 | 2 | Optimizer | done |
-| 3 | SQL subset frontend, REPL | planned |
+| 3 | SQL subset frontend, REPL | done |
 | 4 | Pebble backend (MVP) | planned |
 | 5 | GraphQL frontend | planned |
 | 6 | Bigtable, DynamoDB | planned |
@@ -86,6 +86,35 @@ res, err := ex.Execute(ctx, plan, value.Int(42))
 Lookup orders o via by_user key=[u.id] many reverse limit=10
   Get users u via primary key=[$1]
 ```
+
+## Try it
+
+```sh
+go run ./cmd/dq -schema examples/shop.yaml examples/shop.sql
+```
+
+```
+dq> SELECT u.name, o.id, o.amount
+... FROM users u JOIN orders o ON o.user_id = u.id
+... WHERE u.id = 1 ORDER BY o.created_at DESC LIMIT 2;
+name | id | amount
+-----+----+-------
+ann  | 12 | 9
+ann  | 11 | 7
+(2 rows)
+dq> EXPLAIN SELECT * FROM orders WHERE status = 'open' AND amount > 6;
+Project [orders.id, orders.user_id, orders.status, orders.amount, orders.created_at]
+  Filter orders.amount > 6
+    Scan orders via by_status eq=["open"]
+dq> SELECT * FROM orders WHERE amount > 6;
+ERROR: opt: query requires an unbounded full scan: orders
+```
+
+The shell supports `SELECT` with joins, `ORDER BY`, and `LIMIT`, as well as
+`INSERT` (including `ON CONFLICT`), `UPDATE`, `DELETE`, `RETURNING`, and
+`EXPLAIN`. Queries that would need a full scan or a sort that no index provides
+are rejected. Pass `-allow-full-scan` to allow full scans. From Go, use
+`dquery.Open(catalog, store).Exec(ctx, sql, params...)`.
 
 ## Development
 

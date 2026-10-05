@@ -1,0 +1,36 @@
+# Example schema: users -> orders -> items.
+# Same as internal/fixture (keep them in sync).
+relations:
+  - name: users
+    columns:
+      - {name: id, type: int}
+      - {name: name, type: string}
+      - {name: email, type: string, nullable: true}
+    primary: {partition: [id]}
+    paths:
+      - {name: by_email, partition: [email], unique: true}
+
+  - name: orders
+    columns:
+      - {name: id, type: int}
+      - {name: user_id, type: int}
+      - {name: status, type: string}
+      - {name: amount, type: float}
+      - {name: created_at, type: timestamp}
+    primary: {partition: [id]}
+    paths:
+      - {name: by_user, partition: [user_id], sort: [created_at]}
+      - {name: by_status, partition: [status], sort: [created_at]}
+
+  - name: items
+    columns:
+      - {name: order_id, type: int}
+      - {name: line, type: int}
+      - {name: product, type: string}
+      - {name: qty, type: int}
+    primary: {partition: [order_id], sort: [line]}
+
+relationships:
+  - {name: orders, from: users, from_cols: [id], to: orders, path: by_user, kind: one_to_many}
+  - {name: user, from: orders, from_cols: [user_id], to: users, kind: many_to_one}
+  - {name: items, from: orders, from_cols: [id], to: items, kind: one_to_many}

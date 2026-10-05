@@ -30,6 +30,10 @@ gofmt -l .                  # must print nothing
 - `opt/` — Rule-based optimizer (access-path selection, predicate/limit/projection pushdown, order satisfaction, Map batching).
 - `exec/` — Batched pull executor; mutations run the read side, then one atomic `Store.Apply`.
 - `storage/` — `Store` interface and capabilities. `storage/kvstore` implements relations on an ordered KV (row/index encoding, index maintenance). `storage/memory` is a KV engine. `storage/storagetest` is the conformance suite.
+- `frontend/sql/` — SQL subset: lexer, recursive-descent parser (produces `ir.Expr` directly), binder (name resolution; JOIN ... ON → `Lookup` on an access path). `sql.Compile` = parse + bind + `opt.Optimize`.
+- `dquery.go` (root package `dquery`) — `DB`: SQL in, results out (`Exec`, `ExecScript`, EXPLAIN as rows).
+- `cmd/dq/` — REPL over an in-memory store (`go run ./cmd/dq -schema examples/shop.yaml examples/shop.sql`).
+- `examples/` — Example schema and seed data. `examples/shop.yaml` must stay identical to `internal/fixture` (a test enforces this).
 - `internal/fixture/` — Shared `users → orders → items` test schema and row helpers.
 
 ## Invariants and conventions
@@ -41,5 +45,6 @@ gofmt -l .                  # must print nothing
 - OLTP only. A `Sort` that no access path satisfies is an optimizer error, not a runtime sort. Unbounded full scans are rejected unless `AllowFullScan` is set.
 - Mutations: inserts must not exist yet, and updates/deletes carry the full `Old` image (optimistic check → `ErrConflict`, retried by the executor). Primary key columns cannot be updated.
 - Every new storage backend must pass `storagetest.Run`.
+- SQL outside the OLTP subset must fail with `sql.ErrNotSupported` naming the construct. Do not silently fall back to full scans or runtime sorts.
 - Tests: prefer table-driven tests with golden EXPLAIN strings for plans and rendered result tables for execution. Use `internal/fixture` instead of ad-hoc schemas.
 - Match existing style: short doc comments on exported identifiers, errors prefixed with the package name (`exec: ...`, `kvstore: ...`), and sentinel errors wrapped with `%w`.

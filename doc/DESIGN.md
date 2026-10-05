@@ -61,7 +61,9 @@ Principles:
 
 ```
 go-dquery/
+  dquery.go              DB: compile SQL → optimize → execute (package dquery)
   cmd/dq/                REPL: load schema, run queries, EXPLAIN
+  examples/              example schema and seed data
   value/                 Value, Row, Tuple; order-preserving key encoding
   schema/                Catalog: Relation, Column, AccessPath, Relationship; JSON/YAML loader
   ir/                    Node and expression types, builder, validator, EXPLAIN printer
@@ -391,23 +393,70 @@ time. For example, a multi-row atomic mutation is refused on a store with
 
 ### 10.1 SQL subset (`frontend/sql`)
 
-A hand-written recursive-descent parser and a binder that emits IR directly.
+The frontend is a hand-written lexer and recursive-descent parser. The parser
+produces `ir.Expr` directly, so there is no separate expression AST. The binder
+resolves names against the catalog and emits a naive plan, which `opt` then
+optimizes.
 
 ```
-SELECT cols FROM t [AS a] [JOIN u [AS b] ON equi-conds]* [WHERE conj]
-       [ORDER BY cols [ASC|DESC]] [LIMIT n]
-INSERT INTO t (cols) VALUES (...), (...) [ON CONFLICT (cols) DO NOTHING | DO UPDATE SET ...]
-UPDATE t SET col = expr, ... WHERE conj
-DELETE FROM t WHERE conj
-... [RETURNING cols]
+SELECT item, ... FROM t [[AS] a]
+       [[INNER] JOIN | LEFT [OUTER] JOIN u [[AS] b] ON cond]...
+       [WHERE cond] [ORDER BY col [ASC|DESC], ...] [LIMIT n]
+INSERT INTO t [(cols)] VALUES (...), ... [ON CONFLICT [(pk cols)] DO NOTHING | DO UPDATE SET c = e, ...]
+UPDATE t [[AS] a] SET c = e, ... [WHERE cond]
+DELETE FROM t [[AS] a] [WHERE cond]
+INSERT / UPDATE / DELETE ... [RETURNING item, ...]
+EXPLAIN <statement>
 ```
 
-- Joins are bound as `Lookup` from left to right. The join key must match an
-  access path of the right-hand relation.
-- Anything outside the OLTP subset gets a clear `ErrNotSupported` naming the
-  construct: aggregates, subqueries, non-equi joins, and ORDER BY that no index
-  serves.
-- `UPDATE` and `DELETE` without a selective WHERE clause need `AllowFullScan`.
+The supported expressions are:
+- comparisons, `AND`/`OR`/`NOT`, `[NOT] IN (list)`, `[NOT] BETWEEN`, and
+  `IS [NOT] NULL`
+- `+ - * / %` and unary `-`
+- literals: `'string'` with `''` as the escape, integers, floats, `TRUE`,
+  `FALSE`, and `NULL`
+- parameters, either `$n` or positional `?`, but not both in one statement
+- unquoted identifiers, which are folded to lower case, and `"quoted"`
+  identifiers
+
+String literals are coerced to timestamps where needed. The accepted forms are
+RFC 3339, `YYYY-MM-DD[ HH:MM:SS]`, and `YYYY-MM-DD`.
+
+Binding:
+- Every column reference is qualified (`alias.col`). Ambiguous and unknown
+  names are errors.
+- `FROM t` becomes `Scan(t, primary)` (full), and `WHERE` becomes a `Filter`.
+  The optimizer turns these into access paths.
+- **Joins are bound to `Lookup`s from left to right.** Equality conjuncts of
+  the form `u.col = <expression over earlier tables>` must bind a key prefix
+  that covers the partition of one of `u`'s access paths. A full unique key is
+  preferred (`one`); otherwise the longest prefix is used (`many`). The other
+  `ON` conjuncts become a `Filter` above the lookup. `LEFT JOIN` becomes an
+  optional lookup and does not allow extra `ON` conjuncts.
+- `ORDER BY` items must be columns, or select-list aliases of columns, and
+  become a `Sort` for the optimizer to satisfy. `LIMIT` takes an integer
+  literal.
+- `ON CONFLICT` may only target the primary key. In `DO UPDATE SET`, the
+  proposed row is available as `excluded`.
+- `VALUES` may not reference columns.
+
+Not supported (`ErrNotSupported`): aggregates and functions, `GROUP BY`,
+`HAVING`, `DISTINCT`, subqueries, `WITH`, `UNION`/`INTERSECT`/`EXCEPT`,
+`OFFSET`, `CASE`, `EXISTS`, comma, `RIGHT`, `FULL`, and `CROSS` joins, joins
+that bind no access path, `INSERT ... SELECT`, `UPDATE ... FROM`, and ORDER BY
+expressions. The optimizer reports ORDER BY clauses that no index serves
+(`ErrOrder`) and unbounded full scans, including `UPDATE`/`DELETE` without a
+selective `WHERE` (`ErrFullScan`, unless `AllowFullScan` is set).
+
+**API.** `sql.Compile(catalog, src, opts)` returns the logical plan and the
+optimized plan. `dquery.DB` wraps a catalog, an executor, and options:
+- `Exec` runs one statement with parameters.
+- `ExecScript` runs a script.
+- `EXPLAIN` returns the optimized plan as rows.
+
+**REPL.** `dq -schema s.yaml [-allow-full-scan] [-c SQL] [script.sql ...]`
+uses an in-memory store. Statements end with `;`. The meta-commands are `\d`
+(list tables), `\d table` (columns, access paths, and relationships), and `\q`.
 
 ### 10.2 GraphQL (`frontend/graphql`, after the MVP core)
 
@@ -437,7 +486,7 @@ orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
 | 0 ✅ | `go.mod`, `value` + key encoding, `schema` catalog (Go API + JSON/YAML) | encoding property tests pass |
 | 1 ✅ | `ir` (read + mutation ops), builder, EXPLAIN; `kvstore` + `memory` with `Apply` and index maintenance; `exec` | hand-built read/mutation plans run; conformance suite (incl. randomized index consistency) passes on memory |
 | 2 ✅ | `opt` rules 1–7, also applied to the mutation read side | golden plan tests; optimized vs. original result equivalence |
-| 3 | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
+| 3 ✅ | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
 | 4 | `pebble` backend; full conformance suite incl. randomized index-consistency test | **MVP:** memory and pebble pass identical suites |
 | 5 | GraphQL frontend; N+1 batching verified | thesis test passes |
 | 6 | Bigtable (`cbtemulator`) and DynamoDB (DynamoDB Local) adapters | conformance suite passes, with capability-based skips |

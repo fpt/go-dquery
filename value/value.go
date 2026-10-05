@@ -259,3 +259,23 @@ func (t Tuple) HasNull() bool {
 
 // CompareTuples compares element-wise; a strict prefix sorts first.
 func CompareTuples(a, b Tuple) int { return compareSlices(a, b) }
+
+// timestampLayouts are the accepted textual timestamp forms; values without
+// a zone are interpreted as UTC.
+var timestampLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02",
+}
+
+// ParseTimestamp parses s as a timestamp in one of the accepted forms.
+func ParseTimestamp(s string) (Value, bool) {
+	for _, l := range timestampLayouts {
+		if t, err := time.Parse(l, s); err == nil {
+			return Timestamp(t), true
+		}
+	}
+	return Null, false
+}
