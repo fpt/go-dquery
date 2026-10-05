@@ -365,3 +365,37 @@ func TestValidationAndResolutionErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestMapBatchedMatchesUnbatched(t *testing.T) {
+	e := setup(t)
+	build := func(batched bool) ir.Node {
+		return &ir.Project{
+			Input: &ir.Map{
+				Input: &ir.Scan{Rel: e.ords, Alias: "o", Path: e.ords.Primary},
+				Fields: []ir.MapField{
+					{Name: "user", One: true, Batched: batched, Plan: &ir.Project{
+						Input: &ir.Get{Rel: e.users, Path: e.users.Primary, Key: ir.Exprs(ir.O("o", "user_id"))},
+						Exprs: []ir.NamedExpr{ir.As("name", ir.C("", "name"))},
+					}},
+					{Name: "items", Batched: batched, Plan: &ir.Limit{N: 1, Input: &ir.Scan{
+						Rel: e.items, Path: e.items.Primary, Eq: ir.Exprs(ir.O("o", "id")), Reverse: true}}},
+				},
+			},
+			Exprs: []ir.NamedExpr{ir.As("id", ir.C("o", "id")), ir.As("user", ir.C("", "user")), ir.As("items", ir.C("", "items"))},
+		}
+	}
+	want := `
+id | user | items
+10 | {name: "ann"} | [{order_id: 10, line: 2, product: "ink", qty: 1}]
+11 | {name: "ann"} | []
+12 | {name: "ann"} | [{order_id: 12, line: 1, product: "pad", qty: 3}]
+13 | {name: "bob"} | []
+14 | NULL | []
+`
+	check(t, e.mustRun(build(false)), want)
+	batched := build(true)
+	if !strings.Contains(ir.Explain(batched), "(one, batched)") {
+		t.Fatalf("explain:\n%s", ir.Explain(batched))
+	}
+	check(t, e.mustRun(batched), want)
+}

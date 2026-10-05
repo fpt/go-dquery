@@ -27,6 +27,9 @@ func explain(b *strings.Builder, n Node, depth int) {
 			if f.One {
 				card = "one"
 			}
+			if f.Batched {
+				card += ", batched"
+			}
 			fmt.Fprintf(b, "%s  field %s (%s)\n", indent, f.Name, card)
 			explain(b, f.Plan, depth+2)
 		}
@@ -89,6 +92,15 @@ func line(n Node) string {
 		w.add("Map")
 	case *Limit:
 		w.add("Limit", fmt.Sprint(n.N))
+	case *Sort:
+		keys := make([]string, len(n.Keys))
+		for i, k := range n.Keys {
+			keys[i] = k.Col.String()
+			if k.Desc {
+				keys[i] += " desc"
+			}
+		}
+		w.add("Sort", "["+strings.Join(keys, ", ")+"]")
 	case *Return:
 		w.add("Return")
 	case *Insert:

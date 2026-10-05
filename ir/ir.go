@@ -117,10 +117,29 @@ type Lookup struct {
 // MapField is a nested subplan evaluated once per input row. Inside Plan,
 // Outer expressions refer to the input row. With One set the field is a
 // record (or NULL); otherwise it is a list of records.
+//
+// Batched asks the executor to fetch the subplan's leaf access for a whole
+// input batch at once (one GetMany, or parallel scans) instead of once per
+// row. It requires Plan to be a chain of row-wise operators over a single
+// Get or Scan leaf (see BatchLeaf).
 type MapField struct {
-	Name string
-	Plan Node
-	One  bool
+	Name    string
+	Plan    Node
+	One     bool
+	Batched bool
+}
+
+// SortKey is one ORDER BY item.
+type SortKey struct {
+	Col  Col
+	Desc bool
+}
+
+// Sort is a logical ordering requirement. It has no runtime implementation:
+// the optimizer must satisfy it with an access path order and remove it.
+type Sort struct {
+	Input Node
+	Keys  []SortKey
 }
 
 // Map appends nested results to each input row.
@@ -191,6 +210,7 @@ func (n *Lookup) Shape() Shape {
 	return ShapeStream
 }
 func (n *Map) Shape() Shape    { return n.Input.Shape() }
+func (n *Sort) Shape() Shape   { return n.Input.Shape() }
 func (n *Limit) Shape() Shape  { return n.Input.Shape() }
 func (n *Return) Shape() Shape { return n.Input.Shape() }
 func (*Insert) Shape() Shape   { return ShapeEffect }
@@ -211,6 +231,7 @@ func (n *Map) Inputs() []Node {
 	return in
 }
 func (n *Limit) Inputs() []Node  { return []Node{n.Input} }
+func (n *Sort) Inputs() []Node   { return []Node{n.Input} }
 func (n *Return) Inputs() []Node { return []Node{n.Input} }
 func (n *Insert) Inputs() []Node {
 	if n.Input != nil {
@@ -229,6 +250,7 @@ func (*Project) node() {}
 func (*Lookup) node()  {}
 func (*Map) node()     {}
 func (*Limit) node()   {}
+func (*Sort) node()    {}
 func (*Return) node()  {}
 func (*Insert) node()  {}
 func (*Update) node()  {}
@@ -240,4 +262,29 @@ func AliasOr(alias string, rel *schema.Relation) string {
 		return rel.Name
 	}
 	return alias
+}
+
+// BatchLeaf returns the single Get or Scan leaf of a chain of row-wise
+// operators (Filter, Project, Limit, Lookup, Map), or nil if plan has another
+// shape. Such a plan can be executed for many outer rows by fetching the leaf
+// in one batch.
+func BatchLeaf(plan Node) Node {
+	for {
+		switch n := plan.(type) {
+		case *Get, *Scan:
+			return n
+		case *Filter:
+			plan = n.Input
+		case *Project:
+			plan = n.Input
+		case *Limit:
+			plan = n.Input
+		case *Lookup:
+			plan = n.Input
+		case *Map:
+			plan = n.Input
+		default:
+			return nil
+		}
+	}
 }

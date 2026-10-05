@@ -27,7 +27,19 @@ type stream interface {
 
 // compile turns an IR node into an operator. outer is the layout visible to
 // ir.Outer references (nil outside Map subplans).
-func compile(n ir.Node, outer *layout) (op, error) {
+func compile(n ir.Node, outer *layout) (op, error) { return (&compiler{}).compile(n, outer) }
+
+// compiler optionally replaces one leaf node with a given operator; batched
+// Map fields use this to feed pre-fetched rows into the rest of a subplan.
+type compiler struct {
+	leaf ir.Node
+	repl op
+}
+
+func (c *compiler) compile(n ir.Node, outer *layout) (op, error) {
+	if c.leaf != nil && n == c.leaf {
+		return c.repl, nil
+	}
 	switch n := n.(type) {
 	case *ir.Get:
 		key, err := compileAll(n.Key, nil, outer)
@@ -63,7 +75,7 @@ func compile(n ir.Node, outer *layout) (op, error) {
 		return s, nil
 
 	case *ir.Filter:
-		in, err := compile(n.Input, outer)
+		in, err := c.compile(n.Input, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +86,7 @@ func compile(n ir.Node, outer *layout) (op, error) {
 		return &filterOp{in: in, pred: pred}, nil
 
 	case *ir.Project:
-		in, err := compile(n.Input, outer)
+		in, err := c.compile(n.Input, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -90,7 +102,7 @@ func compile(n ir.Node, outer *layout) (op, error) {
 		return p, nil
 
 	case *ir.Lookup:
-		in, err := compile(n.Input, outer)
+		in, err := c.compile(n.Input, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -102,32 +114,35 @@ func compile(n ir.Node, outer *layout) (op, error) {
 			lay: concat(in.layout(), relLayout(n.Rel, ir.AliasOr(n.Alias, n.Rel)))}, nil
 
 	case *ir.Map:
-		in, err := compile(n.Input, outer)
+		in, err := c.compile(n.Input, outer)
 		if err != nil {
 			return nil, err
 		}
 		m := &mapOp{in: in}
 		extra := &layout{}
 		for _, f := range n.Fields {
-			sub, err := compile(f.Plan, in.layout())
+			mf, err := compileField(f, in.layout())
 			if err != nil {
 				return nil, fmt.Errorf("exec: field %q: %w", f.Name, err)
 			}
-			m.fields = append(m.fields, mapField{plan: sub, one: f.One, names: sub.layout().columnNames()})
+			m.fields = append(m.fields, mf)
 			extra.fields = append(extra.fields, field{name: f.Name})
 		}
 		m.lay = concat(in.layout(), extra)
 		return m, nil
 
 	case *ir.Limit:
-		in, err := compile(n.Input, outer)
+		in, err := c.compile(n.Input, outer)
 		if err != nil {
 			return nil, err
 		}
 		return &limitOp{in: in, n: n.N}, nil
 
 	case *ir.Return:
-		return compile(n.Input, outer)
+		return c.compile(n.Input, outer)
+
+	case *ir.Sort:
+		return nil, fmt.Errorf("exec: Sort %v was not eliminated by the optimizer", n.Keys)
 	}
 	return nil, fmt.Errorf("exec: cannot execute %T as a read", n)
 }
@@ -518,6 +533,39 @@ type mapField struct {
 	plan  op
 	one   bool
 	names []string
+	// Batched fields: leaf fetches rows for all outer rows of a batch, and
+	// plan (with the leaf replaced by providedOp) runs per outer row.
+	leaf op
+}
+
+func compileField(f ir.MapField, outer *layout) (mapField, error) {
+	if !f.Batched {
+		sub, err := compile(f.Plan, outer)
+		if err != nil {
+			return mapField{}, err
+		}
+		return mapField{plan: sub, one: f.One, names: sub.layout().columnNames()}, nil
+	}
+	leafNode := ir.BatchLeaf(f.Plan)
+	leaf, err := compile(leafNode, outer)
+	if err != nil {
+		return mapField{}, err
+	}
+	c := &compiler{leaf: leafNode, repl: &providedOp{lay: leaf.layout()}}
+	sub, err := c.compile(f.Plan, outer)
+	if err != nil {
+		return mapField{}, err
+	}
+	return mapField{plan: sub, one: f.One, names: sub.layout().columnNames(), leaf: leaf}, nil
+}
+
+// providedOp yields the rows pre-fetched for the current outer row.
+type providedOp struct{ lay *layout }
+
+func (p *providedOp) layout() *layout { return p.lay }
+
+func (p *providedOp) open(_ context.Context, e *env) (stream, error) {
+	return &sliceStream{rows: e.provided}, nil
 }
 
 type mapOp struct {
@@ -534,21 +582,79 @@ func (m *mapOp) open(ctx context.Context, e *env) (stream, error) {
 		return nil, err
 	}
 	return &mapStream{in: in, fn: func(batch []value.Row) ([]value.Row, error) {
-		out := make([]value.Row, len(batch))
+		envs := make([]*env, len(batch))
 		for i, row := range batch {
-			sub := &env{ex: e.ex, params: e.params, outer: row}
-			nested := make(value.Row, len(m.fields))
-			for j, f := range m.fields {
+			envs[i] = &env{ex: e.ex, params: e.params, outer: row}
+		}
+		nested := make([]value.Row, len(batch))
+		for i := range nested {
+			nested[i] = make(value.Row, len(m.fields))
+		}
+		for j, f := range m.fields {
+			if f.leaf != nil {
+				if err := f.prefetch(ctx, envs); err != nil {
+					return nil, err
+				}
+			}
+			for i, sub := range envs {
 				rows, err := run(ctx, f.plan, sub)
 				if err != nil {
 					return nil, err
 				}
-				nested[j] = f.nest(rows)
+				nested[i][j] = f.nest(rows)
 			}
-			out[i] = joinRows(row, nested)
+		}
+		out := make([]value.Row, len(batch))
+		for i, row := range batch {
+			out[i] = joinRows(row, nested[i])
 		}
 		return out, nil
 	}}, nil
+}
+
+// prefetch fills env.provided for every outer row: one GetMany for a Get
+// leaf, or parallel scans for a Scan leaf.
+func (f *mapField) prefetch(ctx context.Context, envs []*env) error {
+	if g, ok := f.leaf.(*getOp); ok {
+		var idx []int
+		var keys []value.Tuple
+		for i, sub := range envs {
+			sub.provided = nil
+			k, err := evalKey(g.rel, g.path, g.keys[0], nil, sub)
+			if err != nil {
+				return err
+			}
+			if !k.HasNull() {
+				idx = append(idx, i)
+				keys = append(keys, k)
+			}
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+		rows, err := envs[0].ex.Store.GetMany(ctx, g.rel, g.path, keys, g.cols)
+		if err != nil {
+			return err
+		}
+		for j, i := range idx {
+			if rows[j] != nil {
+				envs[i].provided = []value.Row{rows[j]}
+			}
+		}
+		return nil
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	if len(envs) > 0 {
+		g.SetLimit(envs[0].ex.concurrency())
+	}
+	for _, sub := range envs {
+		g.Go(func() error {
+			rows, err := run(gctx, f.leaf, sub)
+			sub.provided = rows
+			return err
+		})
+	}
+	return g.Wait()
 }
 
 func (f *mapField) nest(rows []value.Row) value.Value {

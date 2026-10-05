@@ -43,6 +43,8 @@ type env struct {
 	ex     *Executor
 	params []value.Value
 	outer  value.Row // enclosing row inside Map subplans
+	// provided holds rows pre-fetched for a batched Map field's leaf.
+	provided []value.Row
 }
 
 // Execute validates and runs a plan.
