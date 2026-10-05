@@ -33,7 +33,7 @@ Early development. The MVP (phases 0–4) is complete: SQL over in-memory or Peb
 | 2 | Optimizer | done |
 | 3 | SQL subset frontend, REPL | done |
 | 4 | Pebble backend (MVP) | done |
-| 5 | GraphQL frontend | planned |
+| 5 | GraphQL frontend | done |
 | 6 | Bigtable, DynamoDB | planned |
 
 ## Example
@@ -116,6 +116,27 @@ The shell supports `SELECT` with joins, `ORDER BY`, and `LIMIT`, as well as
 are rejected. Pass `-allow-full-scan` to allow full scans, and pass
 `-data ./db` to persist the data in a Pebble database. From Go, use
 `dquery.Open(catalog, store).Exec(ctx, sql, params...)`.
+
+## GraphQL
+
+The same catalog is exposed as a Hasura-style GraphQL API, compiled straight to
+the same IR as SQL:
+
+```sh
+go run ./cmd/dq -schema examples/shop.yaml -http :8080 examples/shop.sql
+curl -s localhost:8080/graphql -d '{"query":"{ users_by_pk(id: 1) { name orders(order_by: {created_at: desc}, limit: 2) { id amount } } }"}'
+# {"data":{"users_by_pk":{"name":"ann","orders":[{"id":12,"amount":9},{"id":11,"amount":7}]}}}
+```
+
+The SDL is served at `/graphql/schema`. These two queries compile to the same
+plan, `Scan orders via by_user eq=[1] reverse limit=10`:
+
+```sql
+SELECT id, amount FROM orders WHERE user_id = 1 ORDER BY created_at DESC LIMIT 10
+```
+```graphql
+{ orders(where: {user_id: {_eq: 1}}, order_by: {created_at: desc}, limit: 10) { id amount } }
+```
 
 ## Development
 

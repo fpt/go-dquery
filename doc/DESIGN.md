@@ -478,12 +478,75 @@ optimized plan. `dquery.DB` wraps a catalog, an executor, and options:
 uses an in-memory store by default, or a Pebble database in `DIR`. Statements end with `;`. The meta-commands are `\d`
 (list tables), `\d table` (columns, access paths, and relationships), and `\q`.
 
-### 10.2 GraphQL (`frontend/graphql`, after the MVP core)
+### 10.2 GraphQL (`frontend/graphql`)
 
-The schema is derived from the catalog: relations become types, and
-`Relationship`s become fields. Root fields are `rel(pk)` and `rels(where, first,
-orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
-`limit`. `orderBy` must map to a path ordering.
+The GraphQL schema is generated from the catalog using **Hasura-style
+conventions**, which are widely known and map directly onto access paths.
+`gqlparser` validates every operation against that schema, and the frontend
+then lowers it straight to IR. SQL is never involved.
+
+```graphql
+type Query {
+  users(where: Users_bool_exp, order_by: [Users_order_by!], limit: Int): [Users!]!
+  users_by_pk(id: Int!): Users              # primary path
+  users_by_email(email: String!): Users     # one per unique secondary path
+}
+type Users { id: Int!  name: String!  email: String
+             orders(where: ..., order_by: ..., limit: Int): [Orders!]! }   # relationship
+type Mutation {
+  insert_users(objects: [Users_insert_input!]!): Users_mutation_response   # affected_rows, returning
+  update_users(where: Users_bool_exp!, _set: Users_set_input!): Users_mutation_response
+  delete_users(where: Users_bool_exp!): Users_mutation_response
+}
+```
+
+Type names are the relation names in PascalCase. Columns map to `Int`,
+`Float`, `String`, `Boolean`, `Timestamp` (an RFC 3339 string), and `Bytes`
+(base64). `<T>_bool_exp` supports `_and`, `_or`, `_not`, and, per column, `_eq`,
+`_neq`, `_gt`, `_gte`, `_lt`, `_lte`, `_in`, and `_is_null`.
+
+Lowering:
+- A list field becomes `Project(Limit(Sort(Filter(Scan(rel)))))`. `where`
+  becomes the filter, `order_by` becomes `Sort` (so it must be satisfiable by an
+  index), and `limit` becomes `Limit`. `*_by_pk` and `*_by_<path>` become an
+  equality filter, which the optimizer turns into a `Get`.
+- A relationship field becomes a `Map` field. Its subplan filters the target
+  by `target.key = Outer(parent.col)`. A one-to-many relationship gives a list,
+  and a many-to-one or one-to-one relationship gives a record or null. The
+  optimizer picks the relationship's access path and marks the field `batched`,
+  so a many-to-one relationship under a list fetches its targets with one
+  `GetMany` per batch, which removes the N+1 pattern.
+- Fragments, inline fragments, `@skip`/`@include`, aliases, variables, and
+  `__typename` are supported. Arguments are converted to typed literals when
+  the operation is compiled.
+- Mutations lower to `Insert`/`Update`/`Delete` with `Returning`. Each root
+  mutation field commits on its own. Execution stops at the first error, and
+  earlier fields stay committed.
+
+**Same IR as SQL (the design thesis).** Equivalent flat queries produce
+byte-identical optimized plans. For example,
+`orders(where: {user_id: {_eq: 1}}, order_by: {created_at: desc}, limit: 10) { id amount }`
+and `SELECT id, amount FROM orders WHERE user_id = 1 ORDER BY created_at DESC LIMIT 10`
+both become `Scan orders via by_user eq=[1] reverse limit=10`. A nested
+selection keeps its nested shape (`Map`) rather than being flattened. Its
+access is the same `Scan` (path, direction, and limit) that the equivalent SQL
+join uses in its `Lookup`. `frontend/graphql` tests both claims. Plans can
+differ in literal types: GraphQL converts `"2026-01-02"` to a timestamp when
+the operation is compiled, while SQL keeps the string and coerces it at run
+time.
+
+Errors: a validation error returns `errors` with no data. An optimizer or
+executor error (`ErrFullScan`, `ErrOrder`, a constraint violation) returns
+`data: null` and the error, with the field path.
+
+Not supported: introspection (`__schema`/`__type`), so clients should fetch
+the SDL instead; subscriptions; aggregates; `offset`; `on_conflict`;
+relationships inside mutation `returning`; and `order_by` on nested fields
+across relationships.
+
+**Serving.** `Schema.Handler` serves POST (JSON body) and GET (queries only).
+`dq -http :8080` serves `/graphql` and `/graphql/schema` (SDL). In the shell,
+`\graphql` prints the SDL.
 
 ## 11. Testing strategy
 
@@ -508,7 +571,7 @@ orderBy)`. Nested selections lower to `Map`/`Lookup`, and `first` lowers to
 | 2 ✅ | `opt` rules 1–7, also applied to the mutation read side | golden plan tests; optimized vs. original result equivalence |
 | 3 ✅ | SQL subset including INSERT/UPDATE/DELETE/RETURNING/ON CONFLICT; `cmd/dq` REPL | SQL golden tests; end-to-end tests on memory |
 | 4 ✅ | `pebble` backend; full conformance suite incl. randomized index-consistency test; catalog binding; `dq -data` | **MVP:** memory and pebble pass identical suites, and the end-to-end SQL tests run on both |
-| 5 | GraphQL frontend; N+1 batching verified | thesis test passes |
+| 5 ✅ | GraphQL frontend (queries, mutations, HTTP); N+1 batching verified | thesis test passes: identical plans for flat queries, identical access for nested ones |
 | 6 | Bigtable (`cbtemulator`) and DynamoDB (DynamoDB Local) adapters | conformance suite passes, with capability-based skips |
 | later | protobuf IR serialization, RocksDB cgo adapter, multi-statement transactions, LINQ-like Go API, descending-column encoding | |
 

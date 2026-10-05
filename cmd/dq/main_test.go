@@ -2,8 +2,15 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/fpt/go-dquery"
+	"github.com/fpt/go-dquery/schema"
+	"github.com/fpt/go-dquery/storage/memory"
 )
 
 func TestShellSession(t *testing.T) {
@@ -84,5 +91,45 @@ func TestPersistentData(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "gus") {
 		t.Fatalf("data not persisted:\n%s", out.String())
+	}
+}
+
+func TestGraphQLMux(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cat, err := schema.Load("../../examples/shop.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := &shell{db: dquery.Open(cat, memory.NewStore()), out: &out, errOut: &errOut}
+	sh.execAll(`INSERT INTO users VALUES (1, 'ann', NULL);`)
+	mux, err := newMux(sh.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res, err := http.Post(srv.URL+"/graphql", "application/json", strings.NewReader(`{"query":"{ users_by_pk(id: 1) { name } }"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), `{"data":{"users_by_pk":{"name":"ann"}}}`) {
+		t.Fatalf("graphql: %s", body)
+	}
+	res, err = http.Get(srv.URL + "/graphql/schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	if !strings.Contains(string(body), "users_by_pk(id: Int!): Users") {
+		t.Fatalf("schema: %.200s", body)
+	}
+
+	sh.meta([]string{`\graphql`})
+	if !strings.Contains(out.String(), "type Mutation {") {
+		t.Fatalf("\\graphql output: %.200s", out.String())
 	}
 }

@@ -1,12 +1,13 @@
 // Command dq is an interactive SQL shell over a go-dquery store.
 //
-//	dq -schema shop.yaml [-data DIR] [-allow-full-scan] [-c "SQL"] [script.sql ...]
+//	dq -schema shop.yaml [-data DIR] [-allow-full-scan] [-c "SQL" | -http ADDR] [script.sql ...]
 //
 // Without -data the store is in memory and discarded on exit; with -data it
 // is a Pebble database in DIR.
 //
-// Scripts are executed first; then statements are read from stdin until EOF
-// or \q, unless -c is given.
+// Scripts are executed first. Then, with -c the SQL is executed; with -http
+// GraphQL is served at /graphql (schema SDL at /graphql/schema) until
+// interrupted; otherwise statements are read from stdin until EOF or \q.
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 
 	"github.com/fpt/go-dquery"
 	"github.com/fpt/go-dquery/exec"
+	"github.com/fpt/go-dquery/frontend/graphql"
 	"github.com/fpt/go-dquery/frontend/sql"
 	"github.com/fpt/go-dquery/schema"
 	"github.com/fpt/go-dquery/storage/kvstore"
@@ -41,6 +43,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	allowFull := fs.Bool("allow-full-scan", false, "allow unbounded full scans")
 	dataDir := fs.String("data", "", "persist data in a Pebble database in this directory (default: in memory)")
 	command := fs.String("c", "", "execute this SQL and exit")
+	httpAddr := fs.String("http", "", "serve GraphQL on this address (e.g. :8080) instead of the shell")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -81,6 +84,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *command != "" {
 		if !sh.execAll(*command) {
+			return 1
+		}
+		return 0
+	}
+	if *httpAddr != "" {
+		if err := serve(*httpAddr, sh.db, stderr); err != nil {
+			fmt.Fprintln(stderr, "dq:", err)
 			return 1
 		}
 		return 0
@@ -161,10 +171,18 @@ func (sh *shell) meta(f []string) bool {
 		} else {
 			sh.listTables()
 		}
+	case `\graphql`:
+		gs, err := graphql.NewSchema(sh.db.Catalog)
+		if err != nil {
+			fmt.Fprintln(sh.errOut, "ERROR:", err)
+			break
+		}
+		fmt.Fprint(sh.out, gs.SDL())
 	case `\?`, `\h`:
 		fmt.Fprintln(sh.out, `Statements end with ";". Commands:
   \d          list tables
   \d TABLE    describe a table and its access paths
+  \graphql    print the GraphQL schema (SDL)
   \q          quit`)
 	default:
 		fmt.Fprintf(sh.errOut, "ERROR: unknown command %s (try \\?)\n", f[0])
